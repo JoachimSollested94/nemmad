@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { parseRecipe } from '@/lib/recipe-parser';
+import { parseRecipe, parseRecipeText } from '@/lib/recipe-parser';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -35,11 +35,23 @@ function validateUrl(input: unknown): URL | null {
 }
 
 export async function POST(request: Request) {
-  let body: { url?: unknown };
+  let body: { url?: unknown; text?: unknown };
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: 'Ugyldig forespørgsel.' }, { status: 400 });
+  }
+
+  // Free-text path (pasted text or OCR'd screenshot) — no network fetch.
+  const text = typeof body?.text === 'string' ? body.text.trim() : '';
+  if (text) {
+    try {
+      const recipe = parseRecipeText(text);
+      return NextResponse.json({ recipe });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Kunne ikke læse opskriften fra teksten.';
+      return NextResponse.json({ error: message }, { status: 422 });
+    }
   }
 
   const url = validateUrl(body?.url);

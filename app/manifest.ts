@@ -9,8 +9,8 @@ export default function manifest(): MetadataRoute.Manifest {
     description: 'Opskrifter, cooking mode og indkøbsliste. Importér opskrifter gratis fra et link.',
     start_url: '/',
     display: 'standalone',
-    background_color: '#FAF7F2',
-    theme_color: '#FAF7F2',
+    background_color: '#E9F4E3',
+    theme_color: '#2E5D3A',
     lang: 'da',
     icons: [
       { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },

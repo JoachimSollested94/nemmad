@@ -9,6 +9,7 @@ import {
   isoDurationToMinutes,
   formatDuration,
   parseRecipe,
+  parseRecipeText,
 } from './recipe-parser';
 
 test('parseDanishQuantity — gram', () => {
@@ -108,4 +109,31 @@ test('parseRecipe — microdata', () => {
 
 test('parseRecipe — no recipe data throws', () => {
   assert.throws(() => parseRecipe('<html><body><p>ingen opskrift</p></body></html>'));
+});
+
+test('parseRecipeText — labelled sections split cleanly', () => {
+  const r = parseRecipeText('Pandekager\n\nIngredienser\n2 dl mel\n2 æg\n1 knivspids salt\n\nFremgangsmåde\nPisk det hele sammen.\nSteg på en pande.');
+  assert.equal(r.title, 'Pandekager');
+  assert.equal(r.ingredients.length, 3);
+  assert.equal(r.ingredients[0].name, 'mel');
+  assert.equal(r.ingredients[0].amount, 2);
+  assert.ok(r.steps.length >= 2);
+});
+
+test('parseRecipeText — no headers classifies by line shape', () => {
+  const r = parseRecipeText('Tomatsuppe\n500 g tomater\n1 løg\nsalt og peber\nHak løget fint.\nLad det simre i 20 minutter.');
+  assert.equal(r.title, 'Tomatsuppe');
+  assert.ok(r.ingredients.some((i) => i.name.includes('tomater')));
+  assert.ok(r.steps.some((s) => /simre|hak/i.test(s.body)));
+  // a verb-led sentence must not be mistaken for an ingredient
+  assert.ok(!r.ingredients.some((i) => /simre|hak løget/i.test(i.name)));
+});
+
+test('parseRecipeText — detects a timer inside a step', () => {
+  const r = parseRecipeText('Ris\n\nIngredienser\n1 dl ris\n\nFremgangsmåde\nKog risen i 12 minutter.');
+  assert.equal(r.steps[0].timerSeconds, 720);
+});
+
+test('parseRecipeText — too little text throws', () => {
+  assert.throws(() => parseRecipeText('kun en enkelt linje'));
 });

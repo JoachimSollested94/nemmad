@@ -47,6 +47,7 @@ export interface Recipe {
   steps: Step[];
   isUserRecipe: true;
   sourceUrl?: string;
+  image?: string;
 }
 
 // Intermediate shape both extractors produce before normalisation.
@@ -59,6 +60,7 @@ interface RawRecipe {
   stepStrings: string[];
   kcal?: number | null;
   protein?: number | null;
+  image?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -262,8 +264,18 @@ function normalise(raw: RawRecipe, id: string, sourceUrl?: string): Recipe {
     ? { kcal: Math.round(raw.kcal), protein: Math.round(raw.protein) }
     : null;
 
+  let image: string | undefined;
+  if (raw.image) {
+    try {
+      image = new URL(String(raw.image).trim(), sourceUrl).toString();
+    } catch {
+      image = undefined;
+    }
+  }
+
   return {
     id,
+    image,
     title: clean(raw.title) || 'Importeret opskrift',
     kicker: clean(raw.category || '') || 'Importeret opskrift',
     baseServings: Number.isFinite(yieldNum) && yieldNum > 0 ? yieldNum : 4,
@@ -321,6 +333,18 @@ function parseNutritionNumber(v: unknown): number | null {
   return m ? parseFloat(m[1].replace(',', '.')) : null;
 }
 
+// schema.org image can be a string, an array, or an ImageObject {url}.
+function firstImageUrl(img: unknown): string | undefined {
+  if (!img) return undefined;
+  if (typeof img === 'string') return img;
+  if (Array.isArray(img)) return firstImageUrl(img[0]);
+  if (typeof img === 'object') {
+    const o = img as any;
+    return firstImageUrl(o.url || o.contentUrl || o['@id']);
+  }
+  return undefined;
+}
+
 function extractJsonLd($: CheerioAPI): RawRecipe | null {
   const nodes: any[] = [];
   $('script[type="application/ld+json"]').each((_, el) => {
@@ -350,6 +374,7 @@ function extractJsonLd($: CheerioAPI): RawRecipe | null {
     stepStrings: jsonLdInstructionsToStrings(recipe.recipeInstructions),
     kcal: parseNutritionNumber(nutrition.calories),
     protein: parseNutritionNumber(nutrition.proteinContent),
+    image: firstImageUrl(recipe.image),
   };
 }
 
@@ -408,6 +433,7 @@ function extractMicrodata($: CheerioAPI): RawRecipe | null {
   const totalEl = direct('[itemprop="totalTime"]').first();
   const cookEl = direct('[itemprop="cookTime"]').first();
   const catEl = direct('[itemprop="recipeCategory"]').first();
+  const imgEl = direct('[itemprop="image"]').first();
 
   if (ingredientStrings.length === 0) return null;
 
@@ -423,7 +449,88 @@ function extractMicrodata($: CheerioAPI): RawRecipe | null {
     stepStrings: microdataInstructions($, direct('[itemprop="recipeInstructions"]')),
     kcal: null,
     protein: null,
+    image: imgEl.length ? (imgEl.attr('src') || imgEl.attr('content') || imgEl.attr('href') || undefined) : undefined,
   };
+}
+
+// ---------------------------------------------------------------------------
+// FREE-TEXT PARSING — pasted text or OCR'd photo → Recipe. No schema, so we
+// classify lines heuristically, then reuse normalise() for all the Danish
+// quantity/category/timer processing.
+// ---------------------------------------------------------------------------
+// Danish imperative cooking verbs — a strong signal that a line is a step.
+const STEP_VERB = /^(pisk|rør|tilsæt|steg|bland|lad|kom|hæld|skær|hak|bag|kog|server|vend|drys|pynt|krydr|smag|fordel|form|si|riv|mos|pensl|snit|skyl|dryp|brun|saut[eé]r|simr|anret|montér|del|læg|sæt|tag|varm|opvarm|forvarm|marin[eé]r|panér|tern|skær|skru|dæk|servér)\b/i;
+
+function looksLikeStepText(line: string): boolean {
+  if (/^\s*\d+\s*[.)]\s/.test(line)) return true; // "1. …" / "2) …" numbered step
+  if (line.length > 55) return true; // long prose line
+  if (/[.!?]$/.test(line) && line.split(/\s+/).length >= 3) return true; // sentence
+  if (STEP_VERB.test(line)) return true; // starts with a cooking verb
+  return false;
+}
+
+function looksLikeIngredientText(line: string): boolean {
+  if (/^\s*\d+\s*[.)]\s/.test(line)) return false; // numbered → step, not ingredient
+  const startsQty = /^\s*(\d+([.,]\d+)?|[½¼¾⅓⅔⅕⅖⅗⅘⅙⅛⅜])/.test(line);
+  const unitEarly = /^\s*(?:\S+\s+)?(g|kg|hg|mg|dl|cl|ml|l|spsk|tsk|knsp|knivspids|fed|stk|dåse|dåser|pakke|bundt|kvist|blad|skive|håndfuld|glas|pose)\b/i.test(line);
+  return (startsQty || unitEarly) && line.length < 80;
+}
+
+const isIngredientHeader = (l: string) => /^(ingredienser|det skal du bruge|du skal bruge|dette skal du bruge|indk[øo]bsliste)\b/i.test(l);
+const isStepHeader = (l: string) => /^(fremgangsm[åa]de|s[åa]dan g[øo]r du|s[åa]dan laver du|tilberedning|instruktioner|g[øo]r s[åa]dan|metode|s[åa]dan gør du)\b/i.test(l);
+
+export function parseRecipeText(text: string, id = `user-${Date.now()}`): Recipe {
+  const lines = String(text || '').replace(/\r/g, '').split('\n').map((l) => l.trim()).filter(Boolean);
+  if (lines.length < 3) {
+    throw new Error('For lidt tekst — indsæt hele opskriften med titel, ingredienser og fremgangsmåde.');
+  }
+
+  let title = lines[0];
+  let body = lines.slice(1);
+  if (isIngredientHeader(title) || isStepHeader(title)) {
+    title = 'Importeret opskrift';
+    body = lines;
+  }
+
+  const ingH = body.findIndex(isIngredientHeader);
+  const stepH = body.findIndex(isStepHeader);
+
+  let ingredientStrings: string[] = [];
+  let stepStrings: string[] = [];
+
+  if (ingH !== -1 && stepH !== -1) {
+    // Both sections labelled — split cleanly.
+    if (ingH < stepH) {
+      ingredientStrings = body.slice(ingH + 1, stepH);
+      stepStrings = body.slice(stepH + 1);
+    } else {
+      stepStrings = body.slice(stepH + 1, ingH);
+      ingredientStrings = body.slice(ingH + 1);
+    }
+  } else {
+    // No clear sections — classify each line by shape.
+    for (const l of body) {
+      if (isIngredientHeader(l) || isStepHeader(l)) continue;
+      if (looksLikeStepText(l)) stepStrings.push(l);
+      else if (looksLikeIngredientText(l)) ingredientStrings.push(l);
+      else if (l.length <= 45) ingredientStrings.push(l);
+      else stepStrings.push(l);
+    }
+  }
+
+  stepStrings = stepStrings.map((s) => s.replace(/^\s*\d+\s*[.)]\s*/, '').trim()).filter(Boolean);
+  ingredientStrings = ingredientStrings.map((s) => s.replace(/^[-•*•·]\s*/, '').trim()).filter(Boolean);
+
+  const yieldMatch = String(text).match(/(\d+)\s*(?:personer|portioner|pers\b)/i);
+
+  return normalise({
+    title,
+    ingredientStrings,
+    stepStrings,
+    yield: yieldMatch ? yieldMatch[1] : undefined,
+    kcal: null,
+    protein: null,
+  }, id);
 }
 
 // ---------------------------------------------------------------------------
@@ -434,6 +541,12 @@ export function parseRecipe(html: string, sourceUrl?: string): Recipe {
   const raw = extractJsonLd($) || extractMicrodata($);
   if (!raw || (raw.ingredientStrings.length === 0 && raw.stepStrings.length === 0)) {
     throw new Error('Kunne ikke finde en opskrift på siden. Prøv et direkte link til selve opskriften.');
+  }
+  if (!raw.image) {
+    raw.image = $('meta[property="og:image"]').attr('content')
+      || $('meta[name="og:image"]').attr('content')
+      || $('meta[property="og:image:url"]').attr('content')
+      || undefined;
   }
   return normalise(raw, `user-${Date.now()}`, sourceUrl);
 }
