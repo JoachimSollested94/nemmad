@@ -1,11 +1,12 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   X, ChevronLeft, ChevronRight, Play, Pause, RotateCcw,
   Check, Clock, Users, Flame, UtensilsCrossed, Minus, Plus,
   ChefHat, ShoppingBag, ShoppingCart, Link2, Trash2, AlertCircle, Leaf, FileText, ScanText,
 } from 'lucide-react';
+import { computeRecipeNutrition, macroEnergyShares } from '@/lib/nutrition';
 
 // ---------------------------------------------------------------------------
 // DESIGN TOKENS — fresh "grocery green" palette. Forest header, grass-green
@@ -390,6 +391,121 @@ function IngredientCard({ recipe, servings }) {
           );
         })}
       </ul>
+    </div>
+  );
+}
+
+// Macro colours — protein (green, on-brand), carbs (warm amber), fat (orange).
+const MACRO = {
+  protein: { label: 'Protein', color: '#3C8B45' },
+  carbs: { label: 'Kulhydrat', color: '#E5A93C' },
+  fat: { label: 'Fedt', color: '#E07A4E' },
+};
+
+// Calorie + macro breakdown, computed live from the ingredient list. Shows
+// per 100 g by default (the honest, portion-independent figure) with a toggle
+// to per portion, an energy-split bar, and a coverage note so a partial
+// estimate never masquerades as complete.
+function NutritionCard({ recipe }) {
+  const nutrition = useMemo(() => computeRecipeNutrition(recipe), [recipe]);
+  const [basis, setBasis] = useState('per100'); // 'per100' | 'serving'
+  const [showMissing, setShowMissing] = useState(false);
+
+  if (!nutrition) {
+    return (
+      <div className="rounded-3xl p-5 mb-5" style={{ background: T.surface, boxShadow: T.shadowCard }}>
+        <h2 className="text-lg mb-1.5" style={{ ...font.display, fontWeight: 600, color: T.ink }}>Næringsindhold</h2>
+        <p className="text-sm" style={{ color: T.muted }}>
+          Vi kunne ikke genkende nok af ingredienserne til at beregne kalorier og makroer for denne opskrift.
+        </p>
+      </div>
+    );
+  }
+
+  const m = basis === 'per100' ? nutrition.per100g : nutrition.perServing;
+  const shares = macroEnergyShares(m);
+  const rows = ['protein', 'carbs', 'fat'].map((k) => ({
+    key: k, label: MACRO[k].label, color: MACRO[k].color, grams: m[k], share: shares[k],
+  }));
+  const full = nutrition.coverage >= 0.999;
+  const low = nutrition.coverage < 0.6;
+
+  const Tab = ({ id, children }) => {
+    const active = basis === id;
+    return (
+      <button
+        onClick={() => setBasis(id)}
+        className="px-3 py-1.5 rounded-full text-xs focus-green whitespace-nowrap"
+        style={{ ...font.display, fontWeight: 600, background: active ? T.surface : 'transparent', color: active ? T.greenDark : T.muted, boxShadow: active ? '0 1px 3px rgba(30,70,40,0.12)' : 'none', transition: `all 200ms ${T.spring}` }}
+      >
+        {children}
+      </button>
+    );
+  };
+
+  return (
+    <div className="rounded-3xl p-5 mb-5" style={{ background: T.surface, boxShadow: T.shadowCard }}>
+      <div className="flex items-center justify-between mb-4 gap-3">
+        <h2 className="text-lg" style={{ ...font.display, fontWeight: 600, color: T.ink }}>Næringsindhold</h2>
+        <div className="flex gap-1 p-1 rounded-full" style={{ background: T.greenSoft }}>
+          <Tab id="per100">pr. 100 g</Tab>
+          <Tab id="serving">pr. portion</Tab>
+        </div>
+      </div>
+
+      <div className="flex items-baseline gap-2 mb-4">
+        <Flame size={22} style={{ color: T.green, alignSelf: 'center' }} />
+        <span className="text-4xl leading-none" style={{ ...font.num, fontWeight: 700, color: T.ink }}>{m.kcal}</span>
+        <span className="text-lg" style={{ ...font.display, fontWeight: 600, color: T.body }}>kcal</span>
+        <span className="text-sm ml-1" style={{ color: T.muted }}>{basis === 'per100' ? 'pr. 100 g' : 'pr. portion'}</span>
+      </div>
+
+      {/* Energy-split bar */}
+      <div className="flex w-full rounded-full overflow-hidden mb-4" style={{ height: 10, background: T.hairline }}>
+        {rows.map((r) => (
+          r.share > 0 ? <div key={r.key} style={{ width: `${r.share * 100}%`, background: r.color }} /> : null
+        ))}
+      </div>
+
+      {/* Macro grams */}
+      <div className="grid grid-cols-3 gap-2">
+        {rows.map((r) => (
+          <div key={r.key} className="rounded-2xl px-3 py-3 text-center" style={{ background: T.surfaceSoft }}>
+            <div className="flex items-center justify-center gap-1.5 mb-1">
+              <span style={{ width: 8, height: 8, borderRadius: 999, background: r.color }} />
+              <span className="text-xs" style={{ ...font.display, fontWeight: 600, color: T.body }}>{r.label}</span>
+            </div>
+            <div style={{ ...font.num, fontWeight: 700, color: T.ink, fontSize: 18 }}>{formatAmount(r.grams)}<span className="text-sm" style={{ color: T.muted }}> g</span></div>
+            <div className="text-xs mt-0.5" style={{ ...font.num, color: T.muted }}>{Math.round(r.share * 100)}% energi</div>
+          </div>
+        ))}
+      </div>
+
+      {/* Coverage note — never let a partial estimate look complete. */}
+      <div className="mt-4 pt-3" style={{ borderTop: `1px solid ${T.hairline}` }}>
+        {full ? (
+          <p className="text-xs" style={{ color: T.muted }}>
+            Estimat beregnet ud fra alle {nutrition.considered} ingredienser · samlet ca. {nutrition.totalGrams} g.
+          </p>
+        ) : (
+          <>
+            <button
+              onClick={() => setShowMissing((v) => !v)}
+              className="flex items-center gap-1.5 text-xs focus-green"
+              style={{ ...font.display, fontWeight: 600, color: low ? T.clay : T.greenDark }}
+            >
+              <AlertCircle size={13} />
+              Estimat ud fra {nutrition.matched} af {nutrition.considered} ingredienser
+              <ChevronRight size={13} style={{ transform: showMissing ? 'rotate(90deg)' : 'none', transition: 'transform 200ms ease' }} />
+            </button>
+            {showMissing && (
+              <p className="text-xs mt-1.5" style={{ color: T.muted }}>
+                Ikke medregnet: {nutrition.unmatched.join(', ')}.
+              </p>
+            )}
+          </>
+        )}
+      </div>
     </div>
   );
 }
@@ -838,6 +954,7 @@ function AddRecipe({ onSaved, onCancel, persistAvailable }) {
           <div className="mb-6"><MetaRow recipe={extracted} /></div>
 
           <IngredientCard recipe={extracted} />
+          <NutritionCard recipe={extracted} />
           <StepsCard recipe={extracted} />
 
           {saveWarning && (
@@ -966,6 +1083,7 @@ function RecipeDetail({ recipe, isSelected, onToggleShopping, onStartCooking, on
       </div>
 
       <IngredientCard recipe={recipe} servings={servings} />
+      <NutritionCard recipe={recipe} />
       <StepsCard recipe={recipe} />
 
       <div className="flex gap-3 pb-2">
